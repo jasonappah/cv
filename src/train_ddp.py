@@ -1,7 +1,11 @@
 """Distributed training script for Jester gesture recognition using PyTorch DDP (Windows CPU Version)."""
 
-import argparse
 import os
+# CRITICAL: Set USE_LIBUV=0 BEFORE importing torch to prevent libuv issues
+if os.name == 'nt':  # Windows
+    os.environ['USE_LIBUV'] = '0'
+
+import argparse
 import yaml
 import torch
 import torch.nn as nn
@@ -50,28 +54,29 @@ def setup_distributed():
     # FORCE Gloo for Windows CPU Distributed Training
     backend = 'gloo'
     
-    # Windows-specific Gloo configuration
+    # Windows-specific Gloo configuration - MUST be set before any torch.distributed calls
     if os.name == 'nt':  # Windows
+        # CRITICAL: Set USE_LIBUV=0 FIRST, before any distributed operations
+        os.environ['USE_LIBUV'] = '0'
+        
         # Set default values if not already set
         if 'GLOO_SOCKET_FAMILY' not in os.environ:
             os.environ['GLOO_SOCKET_FAMILY'] = 'INET'
-        if 'USE_LIBUV' not in os.environ:
-            os.environ['USE_LIBUV'] = '0'
         
         # CRITICAL: Remove GLOO_SOCKET_IFNAME if it's set to an IP address
         # This causes "unsupported gloo device" error on Windows
         ifname = os.environ.get('GLOO_SOCKET_IFNAME', '')
-        if ifname and '.' in ifname:  # Looks like an IP address
-            print(f"WARNING: Removing GLOO_SOCKET_IFNAME (was set to IP: {ifname})")
-            del os.environ['GLOO_SOCKET_IFNAME']
+        if ifname:
+            if '.' in ifname:  # Looks like an IP address
+                print(f"WARNING: Removing GLOO_SOCKET_IFNAME (was set to IP: {ifname})")
+                del os.environ['GLOO_SOCKET_IFNAME']
+            else:
+                # Even if it's not an IP, on Windows it's safer to let Gloo auto-detect
+                print(f"INFO: GLOO_SOCKET_IFNAME is set to '{ifname}'. If you get errors, try unsetting it.")
         
-        # Get local IP address to help Gloo identify the correct interface
-        # This prevents hostname resolution issues
+        # Get local IP address for diagnostics
         local_ip = get_local_ip()
         print(f"Detected local IP: {local_ip}")
-        
-        # Set GLOO_SOCKET_IFNAME to the local IP to force Gloo to use the correct interface
-        # Actually, let's try without setting it first - Gloo should auto-detect
         
     # Get master address and port from environment
     master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
@@ -89,18 +94,21 @@ def setup_distributed():
     # Ensure MASTER_ADDR is an IP address, not a hostname
     # This prevents "makeDeviceForHostname" errors
     try:
-        # Try to resolve if it's a hostname
-        socket.inet_aton(master_addr)  # This will raise if not a valid IP
-        # It's already an IP, good
+        # Validate it's a valid IP format
+        socket.inet_aton(master_addr)
+        # It's a valid IP, good
     except socket.error:
-        # It might be a hostname, try to resolve it
+        # It might be a hostname, try to resolve it and use the IP
         try:
             resolved_ip = socket.gethostbyname(master_addr)
-            print(f"WARNING: MASTER_ADDR '{master_addr}' resolved to IP '{resolved_ip}'. "
-                  f"Consider using the IP directly to avoid hostname resolution issues.")
-            # Optionally use resolved IP, but better to warn user to set IP directly
+            print(f"WARNING: MASTER_ADDR '{master_addr}' is a hostname, resolved to '{resolved_ip}'. "
+                  f"Using resolved IP to avoid hostname resolution issues.")
+            master_addr = resolved_ip  # Use the resolved IP
         except socket.gaierror:
-            raise ValueError(f"MASTER_ADDR '{master_addr}' is neither a valid IP nor resolvable hostname.")
+            raise ValueError(
+                f"MASTER_ADDR '{master_addr}' is neither a valid IP nor resolvable hostname. "
+                f"Please set it to an IP address (e.g., 172.20.10.2)."
+            )
     
     # Construct init_method - use IP directly, not hostname
     init_method = f'tcp://{master_addr}:{master_port}'
@@ -108,65 +116,39 @@ def setup_distributed():
     # Print diagnostic information
     print(f"Rank {rank}: Initializing distributed training...")
     print(f"  Backend: {backend}")
-    print(f"  MASTER_ADDR: {master_addr}")
+    print(f"  MASTER_ADDR: {master_addr} (using IP directly)")
     print(f"  MASTER_PORT: {master_port}")
     print(f"  WORLD_SIZE: {world_size}")
+    print(f"  USE_LIBUV: {os.environ.get('USE_LIBUV', 'NOT SET')}")
     print(f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}")
     print(f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET (auto-detect)')}")
     
+    # Use init_method directly - more reliable for Gloo on Windows
+    # Skip TCPStore to avoid libuv issues
     try:
-        # Use store-based initialization which is more reliable on Windows
-        # Create a TCP store for coordination
-        try:
-            from torch.distributed.store import TCPStore
-        except ImportError:
-            # Fallback for older PyTorch versions
-            from torch.distributed import TCPStore
-        
-        # For rank 0 (master), create the store
-        # For other ranks, connect to the store
-        is_master = (rank == 0)
-        store = TCPStore(
-            host_name=master_addr,
-            port=int(master_port) + 1,  # Use different port for store
-            world_size=world_size,
-            is_master=is_master,
-            timeout=torch.distributed.default_pg_timeout
-        )
-        
         dist.init_process_group(
             backend=backend,
-            store=store,
+            init_method=init_method,
             rank=rank,
             world_size=world_size,
             timeout=torch.distributed.default_pg_timeout
         )
         print(f"Rank {rank}: Successfully initialized process group!")
     except Exception as e:
-        # Fallback to init_method if store-based fails
-        print(f"Store-based init failed, trying init_method: {e}")
-        try:
-            dist.init_process_group(
-                backend=backend,
-                init_method=init_method,
-                rank=rank,
-                world_size=world_size,
-                timeout=torch.distributed.default_pg_timeout
-            )
-            print(f"Rank {rank}: Successfully initialized process group!")
-        except Exception as e2:
-            error_msg = f"Failed to initialize process group: {e2}\n"
-            error_msg += f"  MASTER_ADDR: {master_addr}, MASTER_PORT: {master_port}\n"
-            error_msg += f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}\n"
-            error_msg += f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET')}\n"
-            error_msg += "\nTroubleshooting tips:\n"
-            error_msg += "  1. Ensure MASTER_ADDR is the actual IP of the master device (not 0.0.0.0, not hostname)\n"
-            error_msg += "  2. GLOO_SOCKET_IFNAME must be unset or set to interface name (not IP)\n"
-            error_msg += "  3. Ensure both devices can ping each other using IP addresses\n"
-            error_msg += "  4. Check Windows Firewall allows traffic on ports 29500 and 29501\n"
-            error_msg += "  5. Try: ping <master_ip> from worker device\n"
-            print(error_msg)
-            raise
+        error_msg = f"Failed to initialize process group: {e}\n"
+        error_msg += f"  MASTER_ADDR: {master_addr}, MASTER_PORT: {master_port}\n"
+        error_msg += f"  USE_LIBUV: {os.environ.get('USE_LIBUV', 'NOT SET')}\n"
+        error_msg += f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}\n"
+        error_msg += f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET')}\n"
+        error_msg += "\nTroubleshooting tips:\n"
+        error_msg += "  1. Ensure MASTER_ADDR is the actual IP of the master device (not 0.0.0.0, not hostname)\n"
+        error_msg += "  2. Remove GLOO_SOCKET_IFNAME completely: Remove-Item Env:\\GLOO_SOCKET_IFNAME\n"
+        error_msg += "  3. Ensure USE_LIBUV=0 is set before running the script\n"
+        error_msg += "  4. Ensure both devices can ping each other using IP addresses\n"
+        error_msg += "  5. Check Windows Firewall allows traffic on port 29500\n"
+        error_msg += "  6. Try: ping <master_ip> from worker device\n"
+        print(error_msg)
+        raise
     
     return rank, world_size, local_rank
 
