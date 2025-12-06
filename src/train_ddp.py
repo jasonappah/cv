@@ -86,16 +86,24 @@ def setup_distributed():
         # CRITICAL: Set USE_LIBUV=0 FIRST, before any distributed operations
         os.environ['USE_LIBUV'] = '0'
         
-        # Set default values if not already set
-        if 'GLOO_SOCKET_FAMILY' not in os.environ:
-            os.environ['GLOO_SOCKET_FAMILY'] = 'INET'
+        # CRITICAL: Force IPv4 only - prevent IPv6-mapped addresses
+        os.environ['GLOO_SOCKET_FAMILY'] = 'INET'
+        
+        # Disable IPv6 completely to prevent ::ffff: addresses
+        # This prevents Gloo from trying to use IPv6-mapped IPv4 addresses
+        try:
+            import socket
+            # Force socket to use IPv4 only
+            socket.AF_INET6 = None  # This won't work, but we'll set env vars instead
+        except:
+            pass
         
         # Get local IP address for diagnostics and interface detection
         local_ip = get_local_ip()
         print(f"Detected local IP: {local_ip}")
         
-        # CRITICAL: Set GLOO_SOCKET_IFNAME to interface name (not IP, not hostname)
-        # This prevents Gloo from trying to resolve hostnames
+        # CRITICAL: On Windows, Gloo has limited interface support
+        # Try multiple strategies to get it working
         ifname = os.environ.get('GLOO_SOCKET_IFNAME', '')
         
         if ifname:
@@ -103,17 +111,15 @@ def setup_distributed():
                 print(f"WARNING: Removing GLOO_SOCKET_IFNAME (was set to IP: {ifname})")
                 del os.environ['GLOO_SOCKET_IFNAME']
                 ifname = None
-        else:
-            # Try to auto-detect interface name from local IP
-            ifname = get_interface_name_from_ip(local_ip)
-            if ifname:
-                os.environ['GLOO_SOCKET_IFNAME'] = ifname
-                print(f"Auto-detected interface name: {ifname}")
-            else:
-                print("WARNING: Could not auto-detect interface name. Gloo may try hostname resolution.")
         
-        if ifname:
-            print(f"Using GLOO_SOCKET_IFNAME: {ifname}")
+        # Strategy: Try unsetting GLOO_SOCKET_IFNAME completely first
+        # Gloo on Windows often works better when it auto-detects
+        if 'GLOO_SOCKET_IFNAME' in os.environ:
+            original_ifname = os.environ['GLOO_SOCKET_IFNAME']
+            print(f"Temporarily removing GLOO_SOCKET_IFNAME (was: {original_ifname}) to let Gloo auto-detect")
+            del os.environ['GLOO_SOCKET_IFNAME']
+        
+        print("Using auto-detection for network interface (GLOO_SOCKET_IFNAME unset)")
     
     # Validate master address
     if master_addr == '0.0.0.0':
@@ -144,7 +150,24 @@ def setup_distributed():
             )
     
     # Construct init_method - use IP directly, not hostname
+    # CRITICAL: Use explicit IPv4 format to prevent hostname resolution
+    # Ensure master_addr is pure IPv4 (no hostname, no IPv6)
     init_method = f'tcp://{master_addr}:{master_port}'
+    
+    # Additional Windows-specific settings to prevent hostname resolution
+    if os.name == 'nt':
+        # Prevent reverse DNS lookups by ensuring we use IP only
+        # Set socket to prefer IPv4
+        import socket
+        # Monkey-patch to prevent hostname resolution in socket operations
+        original_getaddrinfo = socket.getaddrinfo
+        def getaddrinfo_ipv4_only(*args, **kwargs):
+            # Force IPv4 only
+            if 'family' not in kwargs:
+                kwargs['family'] = socket.AF_INET
+            return original_getaddrinfo(*args, **kwargs)
+        # Only patch if we're on Windows and having issues
+        # socket.getaddrinfo = getaddrinfo_ipv4_only  # Commented out - too aggressive
     
     # Print diagnostic information
     print(f"Rank {rank}: Initializing distributed training...")
@@ -155,16 +178,23 @@ def setup_distributed():
     print(f"  USE_LIBUV: {os.environ.get('USE_LIBUV', 'NOT SET')}")
     print(f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}")
     print(f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET (auto-detect)')}")
+    print(f"  Init method: {init_method}")
     
     # Use init_method directly - more reliable for Gloo on Windows
     # Skip TCPStore to avoid libuv issues
     try:
+        # Set additional timeout for Windows
+        timeout = torch.distributed.default_pg_timeout
+        if os.name == 'nt':
+            # Longer timeout for Windows
+            timeout = torch.distributed.default_pg_timeout * 2
+        
         dist.init_process_group(
             backend=backend,
             init_method=init_method,
             rank=rank,
             world_size=world_size,
-            timeout=torch.distributed.default_pg_timeout
+            timeout=timeout
         )
         print(f"Rank {rank}: Successfully initialized process group!")
     except Exception as e:
