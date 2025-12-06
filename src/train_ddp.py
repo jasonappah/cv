@@ -1,6 +1,7 @@
 """Distributed training script for Jester gesture recognition using PyTorch DDP."""
 
 import argparse
+from datetime import timedelta
 import os
 import yaml
 import torch
@@ -34,11 +35,13 @@ def setup_distributed():
     else:
         backend = 'gloo'
     
+    print(f"Initializing distributed training: rank {rank}, world size {world_size}, local rank {local_rank}")
     dist.init_process_group(
         backend=backend,
         init_method='env://',
         rank=rank,
-        world_size=world_size
+        world_size=world_size,
+        timeout=timedelta(minutes=1)
     )
     
     return rank, world_size, local_rank
