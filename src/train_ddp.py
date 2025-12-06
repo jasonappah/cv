@@ -45,6 +45,29 @@ def get_local_ip():
         except Exception:
             return "127.0.0.1"
 
+def get_interface_name_from_ip(ip_address):
+    """Get Windows network interface name from IP address."""
+    if os.name != 'nt':  # Only for Windows
+        return None
+    
+    try:
+        import subprocess
+        # Use PowerShell to get interface name
+        ps_cmd = f'(Get-NetIPAddress -IPAddress {ip_address}).InterfaceAlias'
+        result = subprocess.run(
+            ['powershell', '-Command', ps_cmd],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            interface_name = result.stdout.strip()
+            return interface_name
+    except Exception as e:
+        print(f"Could not get interface name from IP: {e}")
+    
+    return None
+
 def setup_distributed():
     """Initialize distributed training for Windows CPU."""
     rank = int(os.environ.get('RANK', 0))
@@ -53,6 +76,10 @@ def setup_distributed():
     
     # FORCE Gloo for Windows CPU Distributed Training
     backend = 'gloo'
+    
+    # Get master address first (needed for interface detection)
+    master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
+    master_port = os.environ.get('MASTER_PORT', '29500')
     
     # Windows-specific Gloo configuration - MUST be set before any torch.distributed calls
     if os.name == 'nt':  # Windows
@@ -63,24 +90,30 @@ def setup_distributed():
         if 'GLOO_SOCKET_FAMILY' not in os.environ:
             os.environ['GLOO_SOCKET_FAMILY'] = 'INET'
         
-        # CRITICAL: Remove GLOO_SOCKET_IFNAME if it's set to an IP address
-        # This causes "unsupported gloo device" error on Windows
-        ifname = os.environ.get('GLOO_SOCKET_IFNAME', '')
-        if ifname:
-            if '.' in ifname:  # Looks like an IP address
-                print(f"WARNING: Removing GLOO_SOCKET_IFNAME (was set to IP: {ifname})")
-                del os.environ['GLOO_SOCKET_IFNAME']
-            else:
-                # Even if it's not an IP, on Windows it's safer to let Gloo auto-detect
-                print(f"INFO: GLOO_SOCKET_IFNAME is set to '{ifname}'. If you get errors, try unsetting it.")
-        
-        # Get local IP address for diagnostics
+        # Get local IP address for diagnostics and interface detection
         local_ip = get_local_ip()
         print(f"Detected local IP: {local_ip}")
         
-    # Get master address and port from environment
-    master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
-    master_port = os.environ.get('MASTER_PORT', '29500')
+        # CRITICAL: Set GLOO_SOCKET_IFNAME to interface name (not IP, not hostname)
+        # This prevents Gloo from trying to resolve hostnames
+        ifname = os.environ.get('GLOO_SOCKET_IFNAME', '')
+        
+        if ifname:
+            if '.' in ifname:  # Looks like an IP address - remove it
+                print(f"WARNING: Removing GLOO_SOCKET_IFNAME (was set to IP: {ifname})")
+                del os.environ['GLOO_SOCKET_IFNAME']
+                ifname = None
+        else:
+            # Try to auto-detect interface name from local IP
+            ifname = get_interface_name_from_ip(local_ip)
+            if ifname:
+                os.environ['GLOO_SOCKET_IFNAME'] = ifname
+                print(f"Auto-detected interface name: {ifname}")
+            else:
+                print("WARNING: Could not auto-detect interface name. Gloo may try hostname resolution.")
+        
+        if ifname:
+            print(f"Using GLOO_SOCKET_IFNAME: {ifname}")
     
     # Validate master address
     if master_addr == '0.0.0.0':
