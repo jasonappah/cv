@@ -1,0 +1,41 @@
+# Configuration for Jester Gesture Recognition Training
+
+# Model configuration
+model:
+  num_classes: 27
+  vit_model: "vit_base_patch16_224"
+  vit_pretrained: true
+  ssm_layers: 4
+  ssm_d_state: 16
+  ssm_d_conv: 4
+  ssm_expand: 2
+
+# Data configuration
+data:
+  root_dir: "data/jester"
+  num_frames: 16
+  frame_size: 160
+  batch_size: 4
+  num_workers: 4
+
+# Training configuration
+training:
+  epochs: 50
+  learning_rate: 3e-4
+  optimizer: "adamw"
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  warmup_epochs: 5
+
+# DDP configuration (for reference - set via environment variables)
+ddp:
+  world_size: 3
+  rank: 0  # Set per node: 0, 1, or 2
+  master_addr: "localhost"  # Set to IP of rank 0 machine
+  master_port: 29500
+
+# Paths
+paths:
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+
