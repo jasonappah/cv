@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import logging
 import sys
+import socket
 from pathlib import Path
 
 # Add src to path to handle imports correctly
@@ -19,6 +20,26 @@ sys.path.insert(0, str(Path(__file__).parent))
 from dataset import JesterDataset
 from models.gesture_model import GestureModel
 from utils import calculate_accuracy, save_checkpoint, setup_logging
+
+def get_local_ip():
+    """Get the local IP address that can reach the master."""
+    try:
+        # Try to connect to a remote address to determine local IP
+        # This doesn't actually connect, just determines which interface would be used
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Connect to a public DNS (doesn't actually send data)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+        return local_ip
+    except Exception:
+        # Fallback: try to get hostname IP
+        try:
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            return local_ip
+        except Exception:
+            return "127.0.0.1"
 
 def setup_distributed():
     """Initialize distributed training for Windows CPU."""
@@ -37,18 +58,21 @@ def setup_distributed():
         if 'USE_LIBUV' not in os.environ:
             os.environ['USE_LIBUV'] = '0'
         
-        # IMPORTANT: On Windows, GLOO_SOCKET_IFNAME should be unset or use interface name
-        # If it's set to an IP address, it may cause "unsupported gloo device" error
-        # Let gloo auto-detect the interface if GLOO_SOCKET_IFNAME is not properly configured
+        # CRITICAL: Remove GLOO_SOCKET_IFNAME if it's set to an IP address
+        # This causes "unsupported gloo device" error on Windows
         ifname = os.environ.get('GLOO_SOCKET_IFNAME', '')
         if ifname and '.' in ifname:  # Looks like an IP address
-            # Remove it and let gloo auto-detect, or user should set it to interface name
-            print(f"WARNING: GLOO_SOCKET_IFNAME is set to IP address ({ifname}). "
-                  f"On Windows, this may cause 'unsupported gloo device' error. "
-                  f"Consider unsetting it or using the network interface name instead.")
-            # Uncomment the next line to auto-remove IP-based IFNAME
-            # del os.environ['GLOO_SOCKET_IFNAME']
-    
+            print(f"WARNING: Removing GLOO_SOCKET_IFNAME (was set to IP: {ifname})")
+            del os.environ['GLOO_SOCKET_IFNAME']
+        
+        # Get local IP address to help Gloo identify the correct interface
+        # This prevents hostname resolution issues
+        local_ip = get_local_ip()
+        print(f"Detected local IP: {local_ip}")
+        
+        # Set GLOO_SOCKET_IFNAME to the local IP to force Gloo to use the correct interface
+        # Actually, let's try without setting it first - Gloo should auto-detect
+        
     # Get master address and port from environment
     master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
     master_port = os.environ.get('MASTER_PORT', '29500')
@@ -62,7 +86,23 @@ def setup_distributed():
             "On worker devices, use the master's IP address."
         )
     
-    # Construct init_method
+    # Ensure MASTER_ADDR is an IP address, not a hostname
+    # This prevents "makeDeviceForHostname" errors
+    try:
+        # Try to resolve if it's a hostname
+        socket.inet_aton(master_addr)  # This will raise if not a valid IP
+        # It's already an IP, good
+    except socket.error:
+        # It might be a hostname, try to resolve it
+        try:
+            resolved_ip = socket.gethostbyname(master_addr)
+            print(f"WARNING: MASTER_ADDR '{master_addr}' resolved to IP '{resolved_ip}'. "
+                  f"Consider using the IP directly to avoid hostname resolution issues.")
+            # Optionally use resolved IP, but better to warn user to set IP directly
+        except socket.gaierror:
+            raise ValueError(f"MASTER_ADDR '{master_addr}' is neither a valid IP nor resolvable hostname.")
+    
+    # Construct init_method - use IP directly, not hostname
     init_method = f'tcp://{master_addr}:{master_port}'
     
     # Print diagnostic information
@@ -75,26 +115,58 @@ def setup_distributed():
     print(f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET (auto-detect)')}")
     
     try:
+        # Use store-based initialization which is more reliable on Windows
+        # Create a TCP store for coordination
+        try:
+            from torch.distributed.store import TCPStore
+        except ImportError:
+            # Fallback for older PyTorch versions
+            from torch.distributed import TCPStore
+        
+        # For rank 0 (master), create the store
+        # For other ranks, connect to the store
+        is_master = (rank == 0)
+        store = TCPStore(
+            host_name=master_addr,
+            port=int(master_port) + 1,  # Use different port for store
+            world_size=world_size,
+            is_master=is_master,
+            timeout=torch.distributed.default_pg_timeout
+        )
+        
         dist.init_process_group(
             backend=backend,
-            init_method=init_method,
+            store=store,
             rank=rank,
             world_size=world_size,
             timeout=torch.distributed.default_pg_timeout
         )
         print(f"Rank {rank}: Successfully initialized process group!")
     except Exception as e:
-        error_msg = f"Failed to initialize process group: {e}\n"
-        error_msg += f"  MASTER_ADDR: {master_addr}, MASTER_PORT: {master_port}\n"
-        error_msg += f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}\n"
-        error_msg += f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET')}\n"
-        error_msg += "\nTroubleshooting tips:\n"
-        error_msg += "  1. Ensure MASTER_ADDR is the actual IP of the master device (not 0.0.0.0)\n"
-        error_msg += "  2. Try unsetting GLOO_SOCKET_IFNAME: $env:GLOO_SOCKET_IFNAME = $null\n"
-        error_msg += "  3. Ensure both devices can ping each other\n"
-        error_msg += "  4. Check Windows Firewall allows traffic on port 29500\n"
-        print(error_msg)
-        raise
+        # Fallback to init_method if store-based fails
+        print(f"Store-based init failed, trying init_method: {e}")
+        try:
+            dist.init_process_group(
+                backend=backend,
+                init_method=init_method,
+                rank=rank,
+                world_size=world_size,
+                timeout=torch.distributed.default_pg_timeout
+            )
+            print(f"Rank {rank}: Successfully initialized process group!")
+        except Exception as e2:
+            error_msg = f"Failed to initialize process group: {e2}\n"
+            error_msg += f"  MASTER_ADDR: {master_addr}, MASTER_PORT: {master_port}\n"
+            error_msg += f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}\n"
+            error_msg += f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET')}\n"
+            error_msg += "\nTroubleshooting tips:\n"
+            error_msg += "  1. Ensure MASTER_ADDR is the actual IP of the master device (not 0.0.0.0, not hostname)\n"
+            error_msg += "  2. GLOO_SOCKET_IFNAME must be unset or set to interface name (not IP)\n"
+            error_msg += "  3. Ensure both devices can ping each other using IP addresses\n"
+            error_msg += "  4. Check Windows Firewall allows traffic on ports 29500 and 29501\n"
+            error_msg += "  5. Try: ping <master_ip> from worker device\n"
+            print(error_msg)
+            raise
     
     return rank, world_size, local_rank
 
