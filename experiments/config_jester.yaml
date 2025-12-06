@@ -1,4 +1,4 @@
-# Configuration for Jester Gesture Recognition Training
+# Configuration for Jester Gesture Recognition Training (Windows CPU Test)
 
 # Model configuration
 model:
@@ -12,30 +12,29 @@ model:
 
 # Data configuration
 data:
-  root_dir: "data/jester"
+  root_dir: "data/jester"  # Ensure this path exists, even with dummy data
   num_frames: 16
   frame_size: 160
-  batch_size: 4
-  num_workers: 4
+  batch_size: 2          # Reduced to 2 for CPU testing
+  num_workers: 0         # MUST be 0 for Windows compatibility
 
 # Training configuration
 training:
-  epochs: 50
+  epochs: 5
   learning_rate: 3e-4
   optimizer: "adamw"
   weight_decay: 0.01
   gradient_clip: 1.0
-  warmup_epochs: 5
+  warmup_epochs: 1
 
-# DDP configuration (for reference - set via environment variables)
+# DDP configuration
 ddp:
-  world_size: 3
-  rank: 0  # Set per node: 0, 1, or 2
-  master_addr: "localhost"  # Set to IP of rank 0 machine
+  world_size: 2
+  rank: 0                # Overridden by env vars
+  master_addr: "127.0.0.1" # Placeholder
   master_port: 29500
 
 # Paths
 paths:
   checkpoint_dir: "checkpoints"
   log_dir: "logs"
-
