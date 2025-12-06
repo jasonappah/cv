@@ -114,11 +114,14 @@ class SSMBlock(nn.Module):
         h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
         
         for t in range(T):
-            h = h * torch.exp(dA[:, t]) + x[:, t:t+1, :, None] * dB[:, t]
+            h = h * torch.exp(dA[:, t]) + x[:, t, :, None] * dB[:, t]
             # Compute output: sum over state dimension
             # h: (B, d_inner, d_state), C_param[:, t, :]: (B, d_state)
             # Broadcasting: (B, d_inner, d_state) * (B, 1, d_state) -> (B, d_inner, d_state)
             y[:, t, :] = torch.sum(h * C_param[:, t, :].unsqueeze(1), dim=-1)  # (B, d_inner)
+        
+        # Add D residual
+        y = y + x * self.D
         
         # Gating
         y = y * self.act(z)
@@ -185,4 +188,3 @@ class SimpleSSMBackbone(nn.Module):
             x = x.mean(dim=1)  # (B, D)
         
         return x
-
