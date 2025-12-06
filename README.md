@@ -249,3 +249,8 @@ If you use this code, please cite:
 - Jester Dataset: [20BN-Jester Dataset](https://20bn.com/datasets/jester)
 - Vision Transformer: [An Image is Worth 16x16 Words](https://arxiv.org/abs/2010.11929)
 - Mamba/SSM: [Mamba: Linear-Time Sequence Modeling](https://arxiv.org/abs/2312.00752)
+
+
+## Notes
+
+50 epochs on one MacBook Pro 16in, Apple M4 Pro, 24GB RAM: 18m 14s
