@@ -1,2 +1,2 @@
-# Jester Gesture Recognition Package
+# Model components for gesture recognition
 
