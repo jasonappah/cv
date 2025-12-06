@@ -1,0 +1,4 @@
+export RANK=0
+export WORLD_SIZE=1
+export MASTER_ADDR=192.168.1.210 # jason
+export MASTER_PORT=29500
