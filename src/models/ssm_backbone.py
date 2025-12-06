@@ -105,19 +105,20 @@ class SSMBlock(nn.Module):
         # Simplified selective scan (discretization)
         # For efficiency, we use a simplified version
         dt = F.softplus(dt)
-        dA = torch.einsum("btd,nd->btdn", dt, A)  # (B, T, d_inner, d_state)
-        dB = torch.einsum("btd,btn->btdn", dt, B_param)  # (B, T, d_inner, d_state)
+        dA = torch.einsum("btd,ds->btds", dt, A)  # (B, T, d_inner, d_state)
+        dB = torch.einsum("btd,bts->btds", dt, B_param)  # (B, T, d_inner, d_state)
         
         # Sequential scan (simplified)
         # In practice, this can be optimized with parallel scan
-        y = torch.zeros(B, T, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
+        y = torch.zeros(B, T, self.d_inner, device=x.device, dtype=x.dtype)
         h = torch.zeros(B, self.d_inner, self.d_state, device=x.device, dtype=x.dtype)
         
         for t in range(T):
             h = h * torch.exp(dA[:, t]) + x[:, t:t+1, :, None] * dB[:, t]
-            y[:, t] = torch.sum(h * C_param[:, t:t+1, None, :], dim=-1)
-        
-        y = y.sum(dim=-1)  # (B, T, d_inner)
+            # Compute output: sum over state dimension
+            # h: (B, d_inner, d_state), C_param[:, t, :]: (B, d_state)
+            # Broadcasting: (B, d_inner, d_state) * (B, 1, d_state) -> (B, d_inner, d_state)
+            y[:, t, :] = torch.sum(h * C_param[:, t, :].unsqueeze(1), dim=-1)  # (B, d_inner)
         
         # Gating
         y = y * self.act(z)

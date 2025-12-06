@@ -14,7 +14,7 @@ model:
 data:
   root_dir: "data/jester"
   num_frames: 16
-  frame_size: 160
+  frame_size: 224
   batch_size: 4
   num_workers: 4
 
