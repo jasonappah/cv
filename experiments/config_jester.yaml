@@ -31,7 +31,7 @@ training:
 ddp:
   world_size: 2
   rank: 0                # Overridden by env vars
-  master_addr: "127.0.0.1" # Placeholder
+  master_addr: "172.20.10.3" # Placeholder
   master_port: 29500
 
 # Paths

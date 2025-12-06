@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from .vit_encoder import FrameViTEncoder
 from .ssm_backbone import SimpleSSMBackbone
+#$env:RANK="0"; $env:WORLD_SIZE="2"; $env:MASTER_ADDR="192.168.X.X"; $env:MASTER_PORT="29500"; torchrun --nnodes=2 --nproc_per_node=1 --node_rank=0 --master_addr=$env:MASTER_ADDR --master_port=$env:MASTER_PORT src/train_ddp.py --config experiments/config_jester.yaml
 
 class GestureModel(nn.Module):
     def __init__(self, num_classes=27, vit_model='vit_base_patch16_224', 

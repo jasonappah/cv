@@ -29,12 +29,73 @@ def setup_distributed():
     # FORCE Gloo for Windows CPU Distributed Training
     backend = 'gloo'
     
-    dist.init_process_group(
-        backend=backend,
-        init_method='env://',
-        rank=rank,
-        world_size=world_size
-    )
+    # Windows-specific Gloo configuration
+    if os.name == 'nt':  # Windows
+        # Set default values if not already set
+        if 'GLOO_SOCKET_FAMILY' not in os.environ:
+            os.environ['GLOO_SOCKET_FAMILY'] = 'INET'
+        if 'USE_LIBUV' not in os.environ:
+            os.environ['USE_LIBUV'] = '0'
+        
+        # IMPORTANT: On Windows, GLOO_SOCKET_IFNAME should be unset or use interface name
+        # If it's set to an IP address, it may cause "unsupported gloo device" error
+        # Let gloo auto-detect the interface if GLOO_SOCKET_IFNAME is not properly configured
+        ifname = os.environ.get('GLOO_SOCKET_IFNAME', '')
+        if ifname and '.' in ifname:  # Looks like an IP address
+            # Remove it and let gloo auto-detect, or user should set it to interface name
+            print(f"WARNING: GLOO_SOCKET_IFNAME is set to IP address ({ifname}). "
+                  f"On Windows, this may cause 'unsupported gloo device' error. "
+                  f"Consider unsetting it or using the network interface name instead.")
+            # Uncomment the next line to auto-remove IP-based IFNAME
+            # del os.environ['GLOO_SOCKET_IFNAME']
+    
+    # Get master address and port from environment
+    master_addr = os.environ.get('MASTER_ADDR', '127.0.0.1')
+    master_port = os.environ.get('MASTER_PORT', '29500')
+    
+    # Validate master address
+    if master_addr == '0.0.0.0':
+        raise ValueError(
+            "MASTER_ADDR cannot be '0.0.0.0'. "
+            "Set it to the actual IP address of the master device (e.g., 172.20.10.2). "
+            "On the master device, use its own IP address. "
+            "On worker devices, use the master's IP address."
+        )
+    
+    # Construct init_method
+    init_method = f'tcp://{master_addr}:{master_port}'
+    
+    # Print diagnostic information
+    print(f"Rank {rank}: Initializing distributed training...")
+    print(f"  Backend: {backend}")
+    print(f"  MASTER_ADDR: {master_addr}")
+    print(f"  MASTER_PORT: {master_port}")
+    print(f"  WORLD_SIZE: {world_size}")
+    print(f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}")
+    print(f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET (auto-detect)')}")
+    
+    try:
+        dist.init_process_group(
+            backend=backend,
+            init_method=init_method,
+            rank=rank,
+            world_size=world_size,
+            timeout=torch.distributed.default_pg_timeout
+        )
+        print(f"Rank {rank}: Successfully initialized process group!")
+    except Exception as e:
+        error_msg = f"Failed to initialize process group: {e}\n"
+        error_msg += f"  MASTER_ADDR: {master_addr}, MASTER_PORT: {master_port}\n"
+        error_msg += f"  GLOO_SOCKET_FAMILY: {os.environ.get('GLOO_SOCKET_FAMILY', 'NOT SET')}\n"
+        error_msg += f"  GLOO_SOCKET_IFNAME: {os.environ.get('GLOO_SOCKET_IFNAME', 'NOT SET')}\n"
+        error_msg += "\nTroubleshooting tips:\n"
+        error_msg += "  1. Ensure MASTER_ADDR is the actual IP of the master device (not 0.0.0.0)\n"
+        error_msg += "  2. Try unsetting GLOO_SOCKET_IFNAME: $env:GLOO_SOCKET_IFNAME = $null\n"
+        error_msg += "  3. Ensure both devices can ping each other\n"
+        error_msg += "  4. Check Windows Firewall allows traffic on port 29500\n"
+        print(error_msg)
+        raise
+    
     return rank, world_size, local_rank
 
 def cleanup_distributed():
